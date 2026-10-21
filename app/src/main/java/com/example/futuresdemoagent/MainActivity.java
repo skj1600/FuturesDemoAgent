@@ -1,3 +1,4 @@
+
 package com.example.futuresdemoagent;
 
 import android.app.Activity;
@@ -6,377 +7,341 @@ import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Color;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.*;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
 
-    TextView status, summary, results;
-    Button start, stop, scan;
+    private TextView status, dashboard, output, chatLog;
+    private EditText chatInput;
+    private Button startButton, stopButton, scanButton;
+    private Button tradesButton, chatButton;
 
-    Handler handler = new Handler(Looper.getMainLooper());
-    volatile boolean running = false;
-    volatile boolean scanning = false;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
 
-    Runnable autoScan = new Runnable() {
+    private MarketScanner scanner;
+    private DemoTrader trader;
+    private ChatAssistant assistant;
+    private AppSettings settings;
+
+    private volatile boolean running = false;
+    private volatile boolean scanning = false;
+    private String currentPage = "scanner";
+    private String chatTranscript = "";
+
+    private final Runnable scanLoop = new Runnable() {
         @Override
         public void run() {
             if (running) {
-                scanMarkets();
-                handler.postDelayed(this, 60000);
+                runScan();
+                handler.postDelayed(this,
+                        settings.getScanIntervalSeconds() * 1000L);
             }
         }
     };
 
-    static class Coin {
-        String symbol;
-        String signal = "WAIT";
-        String reason = "Conditions not met";
-        double price, change, volume, score;
-    }
-
     @Override
-    public void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    public void onCreate(Bundle state) {
+        super.onCreate(state);
+
+        settings = new AppSettings(this);
+        trader = new DemoTrader(settings.getDemoBalance());
+        assistant = new ChatAssistant();
+        scanner = new MarketScanner();
+
         buildUI();
+        updateDashboard();
     }
 
-    TextView makeText(String value, int size, int color) {
+    private TextView makeText(String text, int size, int color) {
         TextView t = new TextView(this);
-        t.setText(value);
+        t.setText(text);
         t.setTextSize(size);
         t.setTextColor(color);
         t.setPadding(0, 8, 0, 8);
         return t;
     }
 
-    void buildUI() {
+    private Button makeButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        return b;
+    }
+
+    private void buildUI() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(20, 20, 20, 15);
+        root.setPadding(16, 12, 16, 12);
         root.setBackgroundColor(Color.rgb(14, 19, 30));
 
-        TextView title = makeText("FUTURES AI AGENT", 24, Color.WHITE);
+        TextView title = makeText(
+                "FUTURES AI AGENT", 23, Color.WHITE);
         title.setGravity(Gravity.CENTER);
         root.addView(title);
 
-        root.addView(makeText(
-            "BINANCE USDT PERPETUAL SCANNER", 12, Color.LTGRAY));
+        dashboard = makeText("", 15, Color.rgb(80, 220, 165));
+        root.addView(dashboard);
 
-        summary = makeText("Ready to scan", 16,
-                Color.rgb(80, 220, 165));
-        root.addView(summary);
-
-        status = makeText("Status: STOPPED", 15, Color.YELLOW);
+        status = makeText("Status: STOPPED", 14, Color.YELLOW);
         root.addView(status);
 
-        LinearLayout buttons = new LinearLayout(this);
-
-        start = new Button(this);
-        start.setText("START AUTO");
-
-        stop = new Button(this);
-        stop.setText("STOP");
-
-        buttons.addView(start,
+        LinearLayout nav = new LinearLayout(this);
+        tradesButton = makeButton("TRADES");
+        chatButton = makeButton("AI CHAT");
+        nav.addView(tradesButton,
                 new LinearLayout.LayoutParams(0, -2, 1));
-        buttons.addView(stop,
+        nav.addView(chatButton,
                 new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(nav);
 
-        root.addView(buttons);
+        LinearLayout controls = new LinearLayout(this);
+        startButton = makeButton("START AUTO");
+        stopButton = makeButton("STOP");
+        controls.addView(startButton,
+                new LinearLayout.LayoutParams(0, -2, 1));
+        controls.addView(stopButton,
+                new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(controls);
 
-        scan = new Button(this);
-        scan.setText("SCAN NOW");
-        root.addView(scan);
+        scanButton = makeButton("SCAN NOW");
+        root.addView(scanButton);
 
-        root.addView(makeText(
-            "Analysis: 1m momentum + 5m trend + volume",
-            12, Color.LTGRAY));
+        output = makeText(
+                "Scanner ready. Tap SCAN NOW to fetch market data.",
+                13, Color.WHITE);
 
-        results = makeText(
-            "Tap SCAN NOW to load market data.",
-            13, Color.WHITE);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(results);
-        root.addView(scroll,
+        ScrollView outputScroll = new ScrollView(this);
+        outputScroll.addView(output);
+        root.addView(outputScroll,
                 new LinearLayout.LayoutParams(-1, 0, 1));
 
-        root.addView(makeText(
-            "SIGNALS ONLY • NO REAL ORDERS",
-            12, Color.LTGRAY));
+        chatLog = makeText("", 13, Color.WHITE);
+        chatInput = new EditText(this);
+        chatInput.setSingleLine(false);
+        chatInput.setHint("Hindi mein sawal likho…");
+        chatInput.setTextColor(Color.WHITE);
+        chatInput.setHintTextColor(Color.LTGRAY);
 
-        start.setOnClickListener(v -> {
-            if (!running) {
-                running = true;
-                status.setText("Status: AUTO SCANNING");
-                status.setTextColor(Color.GREEN);
-                scanMarkets();
-                handler.postDelayed(autoScan, 60000);
-            }
+        Button send = makeButton("SEND");
+        LinearLayout chatControls = new LinearLayout(this);
+        chatControls.addView(chatInput,
+                new LinearLayout.LayoutParams(0, -2, 1));
+        chatControls.addView(send);
+
+        root.addView(chatLog);
+        root.addView(chatControls);
+        setContentView(root);
+
+        showPage("scanner");
+
+        startButton.setOnClickListener(v -> {
+            if (running) return;
+            running = true;
+            status.setText("Status: AUTO SCANNING — DEMO ONLY");
+            status.setTextColor(Color.GREEN);
+            runScan();
+            handler.postDelayed(scanLoop,
+                    settings.getScanIntervalSeconds() * 1000L);
         });
 
-        stop.setOnClickListener(v -> {
+        stopButton.setOnClickListener(v -> {
             running = false;
-            handler.removeCallbacks(autoScan);
+            handler.removeCallbacks(scanLoop);
+            if (scanner != null) scanner.stopScan();
             status.setText("Status: STOPPED");
             status.setTextColor(Color.YELLOW);
         });
 
-        scan.setOnClickListener(v -> scanMarkets());
+        scanButton.setOnClickListener(v -> runScan());
 
-        setContentView(root);
+        tradesButton.setOnClickListener(v -> showPage("trades"));
+        chatButton.setOnClickListener(v -> showPage("chat"));
+
+        send.setOnClickListener(v -> sendChat());
     }
 
-    void scanMarkets() {
+    private void showPage(String page) {
+        currentPage = page;
+
+        if ("chat".equals(page)) {
+            output.setText(
+                    "Offline assistant: scanner aur demo trading ke baare mein poochho.");
+            chatLog.setVisibility(View.VISIBLE);
+            chatInput.setVisibility(View.VISIBLE);
+        } else if ("trades".equals(page)) {
+            chatLog.setVisibility(View.GONE);
+            chatInput.setVisibility(View.GONE);
+            showTrades();
+        } else {
+            chatLog.setVisibility(View.GONE);
+            chatInput.setVisibility(View.GONE);
+            output.setText(
+                    "Scanner: top liquid USDT perpetual markets.");
+        }
+    }
+
+    private void runScan() {
         if (scanning) return;
         scanning = true;
 
-        runOnUiThread(() ->
-                status.setText("Loading Binance market data..."));
+        status.setText("Status: FETCHING AND ANALYZING…");
 
-        new Thread(() -> {
+        worker.execute(() -> {
             try {
-                JSONArray tickers = getArray(
-                    "https://fapi.binance.com/fapi/v1/ticker/24hr");
+                List<MarketScanner.ScanResult> results =
+                        scanner.scanTopLiquidMarkets(30);
 
-                ArrayList<Coin> coins = new ArrayList<>();
+                StringBuilder text = new StringBuilder();
+                int watchCount = 0;
+                int newTrades = 0;
 
-                for (int i = 0; i < tickers.length(); i++) {
-                    JSONObject obj = tickers.getJSONObject(i);
-                    String symbol = obj.optString("symbol", "");
+                for (MarketScanner.ScanResult result : results) {
+                    if (result == null || result.signal == null) continue;
 
-                    if (!symbol.endsWith("USDT")) continue;
+                    TradeSignal signal = result.signal;
 
-                    Coin c = new Coin();
-                    c.symbol = symbol;
-                    c.price = obj.optDouble("lastPrice", 0);
-                    c.change = obj.optDouble("priceChangePercent", 0);
-                    c.volume = obj.optDouble("quoteVolume", 0);
+                    // Update existing simulated positions using fetched prices.
+                    trader.updatePrice(signal.symbol, result.price);
 
-                    if (c.price > 0 && c.volume >= 5000000) {
-                        coins.add(c);
-                    }
-                }
+                    // Entry is simulated locally, never sent to Binance.
+                    if (running
+                            && signal.isTradeCandidate()
+                            && signal.score >= settings.getMinimumScore()
+                            && trader.canTrade()) {
 
-                coins.sort((a, b) ->
-                    Double.compare(b.volume, a.volume));
+                        DemoTrader.Trade trade = trader.openTrade(
+                                signal.symbol,
+                                signal.direction.name(),
+                                signal.entryPrice,
+                                signal.stopLoss,
+                                signal.takeProfit);
 
-                // Phone/network load ko control karne ke liye
-                // har scan mein top 30 liquid markets analyze honge.
-                int count = Math.min(30, coins.size());
-                ArrayList<Coin> analyzed = new ArrayList<>();
-
-                for (int i = 0; i < count; i++) {
-                    Coin c = coins.get(i);
-
-                    try {
-                        analyzeCoin(c);
-                    } catch (Exception e) {
-                        c.signal = "WAIT";
-                        c.reason = "Candle data unavailable";
+                        if (trade != null) newTrades++;
                     }
 
-                    analyzed.add(c);
+                    if (signal.direction != TradeSignal.Direction.WAIT) {
+                        watchCount++;
+                    }
+
+                    text.append(String.format(Locale.US,
+                            "%s | Score %.0f/100\n",
+                            signal.symbol, signal.score));
+
+                    text.append("Signal: ")
+                            .append(signal.direction)
+                            .append(" | ")
+                            .append(signal.reason)
+                            .append("\n");
+
+                    if (signal.isTradeCandidate()) {
+                        text.append(String.format(Locale.US,
+                                "Entry %.8f | SL %.8f | TP %.8f\n",
+                                signal.entryPrice,
+                                signal.stopLoss,
+                                signal.takeProfit));
+                    }
+
+                    text.append(String.format(Locale.US,
+                            "24h change %+.2f%% | Volume %.1fM USDT\n\n",
+                            result.change24h,
+                            result.quoteVolume / 1_000_000.0));
                 }
 
-                analyzed.sort((a, b) ->
-                    Double.compare(b.score, a.score));
+                final String display = text.length() == 0
+                        ? "No results. Check network or try again."
+                        : "Analyzed " + results.size()
+                        + " markets • Watch signals: " + watchCount
+                        + " • New simulated trades: " + newTrades
+                        + "\n\n" + text;
 
-                runOnUiThread(() -> showResults(analyzed));
+                runOnUiThread(() -> {
+                    if ("scanner".equals(currentPage)) {
+                        output.setText(display);
+                    }
+                    status.setText(running
+                            ? "Status: AUTO SCAN ACTIVE — SIMULATED"
+                            : "Status: SCAN COMPLETE — DEMO ONLY");
+                    status.setTextColor(Color.GREEN);
+                    updateDashboard();
+                });
 
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    status.setText(
-                        "Network error. Internet check karo.");
+                    status.setText("Scan error. Check internet and retry.");
                     status.setTextColor(Color.RED);
                 });
             } finally {
                 scanning = false;
             }
-        }).start();
+        });
     }
 
-    void analyzeCoin(Coin c) throws Exception {
-        JSONArray one = getArray(
-            "https://fapi.binance.com/fapi/v1/klines?symbol="
-            + c.symbol + "&interval=1m&limit=30");
+    private void updateDashboard() {
+        if (dashboard == null || trader == null) return;
 
-        JSONArray five = getArray(
-            "https://fapi.binance.com/fapi/v1/klines?symbol="
-            + c.symbol + "&interval=5m&limit=30");
-
-        if (one.length() < 25 || five.length() < 25) {
-            c.reason = "Insufficient candles";
-            return;
-        }
-
-        double[] close1 = new double[one.length()];
-        double[] volume1 = new double[one.length()];
-        double[] close5 = new double[five.length()];
-
-        for (int i = 0; i < one.length(); i++) {
-            JSONArray k = one.getJSONArray(i);
-            close1[i] = k.getDouble(4);
-            volume1[i] = k.getDouble(5);
-        }
-
-        for (int i = 0; i < five.length(); i++) {
-            close5[i] = five.getJSONArray(i).getDouble(4);
-        }
-
-        double fast = ema(close5, 7);
-        double slow = ema(close5, 20);
-
-        double trend = (fast / slow - 1) * 100;
-
-        double momentum =
-            (close1[close1.length - 1]
-            / close1[close1.length - 6] - 1) * 100;
-
-        double recentVolume =
-            average(volume1, volume1.length - 3, 3);
-
-        double normalVolume =
-            average(volume1, volume1.length - 18, 15);
-
-        double volumeRatio = normalVolume > 0
-            ? recentVolume / normalVolume : 1;
-
-        c.score = Math.max(0, Math.min(100,
-            50 + trend * 12
-            + momentum * 8
-            + (volumeRatio - 1) * 8));
-
-        boolean volumeRising = volumeRatio >= 1.15;
-        boolean bullish = trend > 0.04 && momentum > 0.03;
-        boolean bearish = trend < -0.04 && momentum < -0.03;
-
-        if (bullish && volumeRising && c.change < 8) {
-            c.signal = "LONG WATCH";
-            c.reason = "Uptrend + momentum + rising volume";
-        } else if (bearish && volumeRising && c.change > -8) {
-            c.signal = "SHORT WATCH";
-            c.reason = "Downtrend + momentum + rising volume";
-        } else {
-            c.signal = "WAIT";
-            c.reason = "Entry filters not satisfied";
-        }
+        dashboard.setText(String.format(Locale.US,
+                "Demo balance: %.2f USDT | Open positions: %d | Realized P/L: %.2f",
+                trader.getBalance(),
+                trader.getOpenTradeCount(),
+                trader.getRealizedProfitLoss()));
     }
 
-    double ema(double[] values, int period) {
-        double result = values[0];
-        double alpha = 2.0 / (period + 1);
+    private void showTrades() {
+        StringBuilder text = new StringBuilder();
+        text.append("SIMULATED TRADE HISTORY\n\n");
 
-        for (int i = 1; i < values.length; i++) {
-            result = alpha * values[i]
-                   + (1 - alpha) * result;
+        List<DemoTrader.Trade> trades = trader.getTradeHistory();
+
+        if (trades.isEmpty()) {
+            text.append("Abhi koi simulated trade nahi hai.");
         }
 
-        return result;
-    }
+        for (DemoTrader.Trade t : trades) {
+            text.append(t.symbol).append(" | ").append(t.side).append("\n");
+            text.append(String.format(Locale.US,
+                    "Entry: %.8f | SL: %.8f | TP: %.8f\n",
+                    t.entryPrice, t.stopLoss, t.takeProfit));
 
-    double average(double[] values, int start, int count) {
-        double total = 0;
-        int n = 0;
-
-        for (int i = Math.max(0, start);
-             i < Math.min(values.length, start + count); i++) {
-            total += values[i];
-            n++;
-        }
-
-        return n == 0 ? 0 : total / n;
-    }
-
-    JSONArray getArray(String address) throws Exception {
-        HttpURLConnection connection =
-            (HttpURLConnection) new URL(address).openConnection();
-
-        connection.setRequestMethod("GET");
-        connection.setConnectTimeout(10000);
-        connection.setReadTimeout(10000);
-
-        try {
-            int code = connection.getResponseCode();
-
-            if (code < 200 || code >= 300) {
-                throw new Exception("HTTP " + code);
+            if (t.closed) {
+                text.append(String.format(Locale.US,
+                        "Exit: %.8f | P/L: %.4f | %s\n",
+                        t.exitPrice, t.profitLoss, t.exitReason));
+            } else {
+                text.append("Status: OPEN — SIMULATED\n");
             }
-
-            BufferedReader reader = new BufferedReader(
-                new InputStreamReader(connection.getInputStream()));
-
-            StringBuilder body = new StringBuilder();
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-                body.append(line);
-            }
-
-            reader.close();
-            return new JSONArray(body.toString());
-
-        } finally {
-            connection.disconnect();
+            text.append("\n");
         }
+
+        output.setText(text.toString());
+        updateDashboard();
     }
 
-    void showResults(ArrayList<Coin> coins) {
-        StringBuilder out = new StringBuilder();
-        int signals = 0;
+    private void sendChat() {
+        String message = chatInput.getText().toString().trim();
+        if (message.isEmpty()) return;
 
-        for (Coin c : coins) {
-            if (c.signal.endsWith("WATCH")) signals++;
-        }
+        String reply = assistant.reply(message);
 
-        out.append("Analyzed markets: ")
-           .append(coins.size())
-           .append("\nWatch signals: ")
-           .append(signals)
-           .append("\nUpdated: ")
-           .append(new SimpleDateFormat(
-                "HH:mm:ss", Locale.getDefault()).format(new Date()))
-           .append("\n\n");
+        chatTranscript += "You: " + message + "\n"
+                + "Assistant: " + reply + "\n\n";
 
-        for (int i = 0; i < coins.size(); i++) {
-            Coin c = coins.get(i);
-
-            out.append(String.format(Locale.US,
-                "%02d  %s | Score %.0f/100\n",
-                i + 1, c.symbol, c.score));
-
-            out.append(String.format(Locale.US,
-                "Price: %.8f USDT\n24h change: %+.2f%%\nVolume: %.1fM USDT\n",
-                c.price, c.change, c.volume / 1000000.0));
-
-            out.append("Signal: ")
-               .append(c.signal)
-               .append("\n")
-               .append(c.reason)
-               .append("\n\n");
-        }
-
-        results.setText(out.toString());
-        summary.setText("Analyzed " + coins.size()
-                + " liquid markets");
-        status.setText("Scan complete • Signals only");
-        status.setTextColor(Color.GREEN);
+        chatLog.setText(chatTranscript);
+        chatInput.setText("");
+        showPage("chat");
+        chatLog.setText(chatTranscript);
     }
 
     @Override
     protected void onDestroy() {
         running = false;
-        handler.removeCallbacks(autoScan);
+        handler.removeCallbacks(scanLoop);
+
+        if (scanner != null) scanner.shutdown();
+        worker.shutdownNow();
+
         super.onDestroy();
     }
 }
