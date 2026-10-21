@@ -3,33 +3,20 @@ package com.example.futuresdemoagent;
 
 public class TradeSignal {
 
-    public enum Direction {
-        LONG, SHORT, WAIT
-    }
-
-    public enum Confidence {
-        LOW, MEDIUM, HIGH
-    }
+    public enum Direction { LONG, SHORT, WAIT }
+    public enum Confidence { LOW, MEDIUM, HIGH }
 
     public final String symbol;
     public final Direction direction;
     public final Confidence confidence;
-    public final double entryPrice;
-    public final double stopLoss;
-    public final double takeProfit;
-    public final double score;
+    public final double entryPrice, stopLoss, takeProfit, score;
     public final String reason;
     public final long timestamp;
 
-    public TradeSignal(
-            String symbol,
-            Direction direction,
-            Confidence confidence,
-            double entryPrice,
-            double stopLoss,
-            double takeProfit,
-            double score,
-            String reason) {
+    public TradeSignal(String symbol, Direction direction,
+            Confidence confidence, double entryPrice,
+            double stopLoss, double takeProfit,
+            double score, String reason) {
 
         this.symbol = symbol == null ? "" : symbol;
         this.direction = direction == null
@@ -40,7 +27,8 @@ public class TradeSignal {
         this.entryPrice = entryPrice;
         this.stopLoss = stopLoss;
         this.takeProfit = takeProfit;
-        this.score = Math.max(0, Math.min(100, score));
+        this.score = finite(score)
+                ? Math.max(0, Math.min(100, score)) : 0;
         this.reason = reason == null ? "" : reason;
         this.timestamp = System.currentTimeMillis();
     }
@@ -48,10 +36,10 @@ public class TradeSignal {
     public boolean isTradeCandidate() {
         if (direction == Direction.WAIT
                 || symbol.isEmpty()
-                || entryPrice <= 0
-                || stopLoss <= 0
-                || takeProfit <= 0
-                || score < 70) {
+                || !finite(entryPrice) || !finite(stopLoss)
+                || !finite(takeProfit) || !finite(score)
+                || entryPrice <= 0 || stopLoss <= 0
+                || takeProfit <= 0 || score < 70) {
             return false;
         }
 
@@ -60,25 +48,35 @@ public class TradeSignal {
                     && takeProfit > entryPrice;
         }
 
-        return stopLoss > entryPrice
-                && takeProfit < entryPrice;
+        if (direction == Direction.SHORT) {
+            return stopLoss > entryPrice
+                    && takeProfit < entryPrice;
+        }
+
+        return false;
     }
 
     public double getRiskRewardRatio() {
-        if (entryPrice <= 0) return 0;
+        if (!finite(entryPrice) || !finite(stopLoss)
+                || !finite(takeProfit) || entryPrice <= 0) {
+            return 0;
+        }
 
         double risk = Math.abs(entryPrice - stopLoss);
         double reward = Math.abs(takeProfit - entryPrice);
 
-        if (risk <= 0) return 0;
+        if (risk <= 0 || !finite(risk) || !finite(reward)) return 0;
 
         return reward / risk;
+    }
+
+    private static boolean finite(double value) {
+        return !Double.isNaN(value) && !Double.isInfinite(value);
     }
 
     @Override
     public String toString() {
         return symbol + " | " + direction
-                + " | Score: " + score
-                + " | " + reason;
+                + " | Score: " + score + " | " + reason;
     }
 }
