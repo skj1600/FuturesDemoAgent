@@ -15,8 +15,10 @@ public class RiskManager {
         this.riskPercent = clamp(riskPercent, 0.1, 1.0);
         this.maxDailyLossPercent =
                 clamp(maxDailyLossPercent, 0.5, 5.0);
+
         this.startingBalance = validAmount(startingBalance)
                 ? startingBalance : 0;
+
         this.dailyLoss = 0;
     }
 
@@ -26,12 +28,18 @@ public class RiskManager {
         if (!validAmount(balance)
                 || !validAmount(entryPrice)
                 || !validAmount(stopPrice)
-                || entryPrice == stopPrice) {
+                || entryPrice == stopPrice
+                || !canTrade()) {
             return 0;
         }
 
         double distance = Math.abs(entryPrice - stopPrice);
-        double riskAmount = balance * riskPercent / 100.0;
+        double normalRisk = balance * riskPercent / 100.0;
+        double remainingRisk = getRemainingDailyRisk();
+
+        double riskAmount = Math.min(normalRisk, remainingRisk);
+        if (riskAmount <= 0) return 0;
+
         double riskQuantity = riskAmount / distance;
 
         // Maximum notional exposure: 20% of balance.
@@ -46,13 +54,11 @@ public class RiskManager {
 
     public synchronized boolean canTrade() {
         if (startingBalance <= 0) return false;
-
-        double maxLoss = getMaxDailyLoss();
-        return dailyLoss < maxLoss;
+        return dailyLoss < getMaxDailyLoss();
     }
 
     public synchronized void recordLoss(double lossAmount) {
-        if (validAmount(lossAmount) && lossAmount > 0) {
+        if (validAmount(lossAmount)) {
             dailyLoss += lossAmount;
         }
     }
@@ -73,6 +79,14 @@ public class RiskManager {
 
     public synchronized double getRemainingDailyRisk() {
         return Math.max(0, getMaxDailyLoss() - dailyLoss);
+    }
+
+    public double getRiskPercent() {
+        return riskPercent;
+    }
+
+    public double getMaxDailyLossPercent() {
+        return maxDailyLossPercent;
     }
 
     private static double clamp(double value,
