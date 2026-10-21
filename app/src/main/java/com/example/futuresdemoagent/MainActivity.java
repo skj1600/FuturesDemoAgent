@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
+
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -26,6 +27,7 @@ public class MainActivity extends Activity {
     private DemoTrader trader;
     private ChatAssistant assistant;
     private AppSettings settings;
+    private AiEngine aiEngine;
 
     private volatile boolean running = false;
     private volatile boolean scanning = false;
@@ -50,6 +52,7 @@ public class MainActivity extends Activity {
         settings = new AppSettings(this);
         trader = new DemoTrader(settings.getDemoBalance());
         assistant = new ChatAssistant();
+        aiEngine = new AiEngine(settings.getMinimumScore(), 1.5);
         scanner = new MarketScanner();
 
         buildUI();
@@ -77,12 +80,11 @@ public class MainActivity extends Activity {
         root.setPadding(16, 12, 16, 12);
         root.setBackgroundColor(Color.rgb(14, 19, 30));
 
-        TextView title = makeText(
-                "FUTURES AI AGENT", 23, Color.WHITE);
+        TextView title = makeText("FUTURES AI AGENT", 23, Color.WHITE);
         title.setGravity(Gravity.CENTER);
         root.addView(title);
 
-        dashboard = makeText("", 15, Color.rgb(80, 220, 165));
+        dashboard = makeText("", 14, Color.rgb(80, 220, 165));
         root.addView(dashboard);
 
         status = makeText("Status: STOPPED", 14, Color.YELLOW);
@@ -91,37 +93,30 @@ public class MainActivity extends Activity {
         LinearLayout nav = new LinearLayout(this);
         tradesButton = makeButton("TRADES");
         chatButton = makeButton("AI CHAT");
-        nav.addView(tradesButton,
-                new LinearLayout.LayoutParams(0, -2, 1));
-        nav.addView(chatButton,
-                new LinearLayout.LayoutParams(0, -2, 1));
+        nav.addView(tradesButton, new LinearLayout.LayoutParams(0, -2, 1));
+        nav.addView(chatButton, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(nav);
 
         LinearLayout controls = new LinearLayout(this);
-        startButton = makeButton("START AUTO");
+        startButton = makeButton("START DEMO");
         stopButton = makeButton("STOP");
-        controls.addView(startButton,
-                new LinearLayout.LayoutParams(0, -2, 1));
-        controls.addView(stopButton,
-                new LinearLayout.LayoutParams(0, -2, 1));
+        controls.addView(startButton, new LinearLayout.LayoutParams(0, -2, 1));
+        controls.addView(stopButton, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(controls);
 
         scanButton = makeButton("SCAN NOW");
         root.addView(scanButton);
 
-        output = makeText(
-                "Scanner ready. Tap SCAN NOW to fetch market data.",
+        output = makeText("Ready. Tap SCAN NOW to analyze markets.",
                 13, Color.WHITE);
-
-        ScrollView outputScroll = new ScrollView(this);
-        outputScroll.addView(output);
-        root.addView(outputScroll,
-                new LinearLayout.LayoutParams(-1, 0, 1));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(output);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         chatLog = makeText("", 13, Color.WHITE);
         chatInput = new EditText(this);
         chatInput.setSingleLine(false);
-        chatInput.setHint("Hindi mein sawal likho…");
+        chatInput.setHint("Ask about signals or trades...");
         chatInput.setTextColor(Color.WHITE);
         chatInput.setHintTextColor(Color.LTGRAY);
 
@@ -140,8 +135,10 @@ public class MainActivity extends Activity {
         startButton.setOnClickListener(v -> {
             if (running) return;
             running = true;
-            status.setText("Status: AUTO SCANNING — DEMO ONLY");
+            scanner.startScan();
+            status.setText("DEMO AUTO-SCAN ACTIVE");
             status.setTextColor(Color.GREEN);
+            handler.removeCallbacks(scanLoop);
             runScan();
             handler.postDelayed(scanLoop,
                     settings.getScanIntervalSeconds() * 1000L);
@@ -150,16 +147,14 @@ public class MainActivity extends Activity {
         stopButton.setOnClickListener(v -> {
             running = false;
             handler.removeCallbacks(scanLoop);
-            if (scanner != null) scanner.stopScan();
-            status.setText("Status: STOPPED");
+            scanner.stopScan();
+            status.setText("STOPPED — DEMO ONLY");
             status.setTextColor(Color.YELLOW);
         });
 
         scanButton.setOnClickListener(v -> runScan());
-
         tradesButton.setOnClickListener(v -> showPage("trades"));
         chatButton.setOnClickListener(v -> showPage("chat"));
-
         send.setOnClickListener(v -> sendChat());
     }
 
@@ -167,115 +162,122 @@ public class MainActivity extends Activity {
         currentPage = page;
 
         if ("chat".equals(page)) {
-            output.setText(
-                    "Offline assistant: scanner aur demo trading ke baare mein poochho.");
+            output.setText("Offline assistant. Chat integration is basic.");
             chatLog.setVisibility(View.VISIBLE);
             chatInput.setVisibility(View.VISIBLE);
-        } else if ("trades".equals(page)) {
-            chatLog.setVisibility(View.GONE);
-            chatInput.setVisibility(View.GONE);
-            showTrades();
         } else {
             chatLog.setVisibility(View.GONE);
             chatInput.setVisibility(View.GONE);
-            output.setText(
-                    "Scanner: top liquid USDT perpetual markets.");
+
+            if ("trades".equals(page)) {
+                showTrades();
+            } else {
+                output.setText("Scanner: eligible liquid USDT markets.");
+            }
         }
     }
 
     private void runScan() {
-        if (scanning) return;
+        if (scanning || worker.isShutdown()) return;
         scanning = true;
-
-        status.setText("Status: FETCHING AND ANALYZING…");
+        status.setText("Fetching market data...");
 
         worker.execute(() -> {
+            String display;
             try {
                 List<MarketScanner.ScanResult> results =
                         scanner.scanTopLiquidMarkets(30);
 
-                StringBuilder text = new StringBuilder();
-                int watchCount = 0;
-                int newTrades = 0;
+                List<AiEngine.Candidate> candidates = new ArrayList<>();
 
-                for (MarketScanner.ScanResult result : results) {
-                    if (result == null || result.signal == null) continue;
+                for (MarketScanner.ScanResult r : results) {
+                    if (r == null || r.signal == null) continue;
 
-                    TradeSignal signal = result.signal;
-
-                    // Update existing simulated positions using fetched prices.
-                    trader.updatePrice(signal.symbol, result.price);
-
-                    // Entry is simulated locally, never sent to Binance.
-                    if (running
-                            && signal.isTradeCandidate()
-                            && signal.score >= settings.getMinimumScore()
-                            && trader.canTrade()) {
-
-                        DemoTrader.Trade trade = trader.openTrade(
-                                signal.symbol,
-                                signal.direction.name(),
-                                signal.entryPrice,
-                                signal.stopLoss,
-                                signal.takeProfit);
-
-                        if (trade != null) newTrades++;
+                    if (r.signal.isTradeCandidate()) {
+                        candidates.add(new AiEngine.Candidate(
+                                r.signal,
+                                r.volumeRatio,
+                                r.trendAlignment));
                     }
-
-                    if (signal.direction != TradeSignal.Direction.WAIT) {
-                        watchCount++;
-                    }
-
-                    text.append(String.format(Locale.US,
-                            "%s | Score %.0f/100\n",
-                            signal.symbol, signal.score));
-
-                    text.append("Signal: ")
-                            .append(signal.direction)
-                            .append(" | ")
-                            .append(signal.reason)
-                            .append("\n");
-
-                    if (signal.isTradeCandidate()) {
-                        text.append(String.format(Locale.US,
-                                "Entry %.8f | SL %.8f | TP %.8f\n",
-                                signal.entryPrice,
-                                signal.stopLoss,
-                                signal.takeProfit));
-                    }
-
-                    text.append(String.format(Locale.US,
-                            "24h change %+.2f%% | Volume %.1fM USDT\n\n",
-                            result.change24h,
-                            result.quoteVolume / 1_000_000.0));
                 }
 
-                final String display = text.length() == 0
-                        ? "No results. Check network or try again."
-                        : "Analyzed " + results.size()
-                        + " markets • Watch signals: " + watchCount
-                        + " • New simulated trades: " + newTrades
-                        + "\n\n" + text;
+                List<AiEngine.Candidate> ranked =
+                        aiEngine.rankCandidates(candidates);
 
-                runOnUiThread(() -> {
-                    if ("scanner".equals(currentPage)) {
-                        output.setText(display);
+                // Update existing simulated positions with fresh prices.
+                for (MarketScanner.ScanResult r : results) {
+                    if (r != null && r.signal != null) {
+                        trader.updatePrice(r.signal.symbol, r.price);
                     }
-                    status.setText(running
-                            ? "Status: AUTO SCAN ACTIVE — SIMULATED"
-                            : "Status: SCAN COMPLETE — DEMO ONLY");
-                    status.setTextColor(Color.GREEN);
-                    updateDashboard();
-                });
+                }
+
+                int newTrades = 0;
+                AiEngine.Candidate best =
+                        ranked.isEmpty() ? null : ranked.get(0);
+
+                // Only the highest-ranked candidate can open a demo position.
+                if (running && best != null && trader.canTrade()) {
+                    TradeSignal s = best.signal;
+                    DemoTrader.Trade trade = trader.openTrade(
+                            s.symbol, s.direction.name(),
+                            s.entryPrice, s.stopLoss, s.takeProfit);
+                    if (trade != null) newTrades++;
+                }
+
+                StringBuilder b = new StringBuilder();
+                b.append("Markets analyzed: ").append(results.size())
+                        .append("\nQualified setups: ").append(ranked.size())
+                        .append("\nNew demo trades: ").append(newTrades)
+                        .append("\n\n");
+
+                if (best == null) {
+                    b.append("AI BRAIN: No setup passed filters. WAIT.\n\n");
+                } else {
+                    b.append("TOP SETUP\n")
+                            .append(aiEngine.explain(best))
+                            .append("\n\n");
+                }
+
+                for (MarketScanner.ScanResult r : results) {
+                    if (r == null || r.signal == null) continue;
+                    TradeSignal s = r.signal;
+
+                    b.append(s.symbol).append(" | ")
+                            .append(s.direction)
+                            .append(" | Score ")
+                            .append(String.format(Locale.US, "%.0f", s.score))
+                            .append("\n")
+                            .append(s.reason).append("\n")
+                            .append(String.format(Locale.US,
+                                    "Price %.8f | 24h %+.2f%% | Volume %.1fM\n",
+                                    r.price, r.change24h,
+                                    r.quoteVolume / 1_000_000.0));
+
+                    if (s.isTradeCandidate()) {
+                        b.append(String.format(Locale.US,
+                                "Entry %.8f | SL %.8f | TP %.8f\n",
+                                s.entryPrice, s.stopLoss, s.takeProfit));
+                    }
+                    b.append("\n");
+                }
+
+                display = b.toString();
 
             } catch (Exception e) {
-                runOnUiThread(() -> {
-                    status.setText("Scan error. Check internet and retry.");
-                    status.setTextColor(Color.RED);
-                });
-            } finally {
-                scanning = false;
+                display = "Scan failed: " + e.getMessage();
             }
+
+            final String finalDisplay = display;
+            runOnUiThread(() -> {
+                if ("scanner".equals(currentPage)) {
+                    output.setText(finalDisplay);
+                }
+                status.setText(running
+                        ? "DEMO AUTO-SCAN ACTIVE"
+                        : "SCAN COMPLETE — DEMO ONLY");
+                updateDashboard();
+                scanning = false;
+            });
         });
     }
 
@@ -283,39 +285,34 @@ public class MainActivity extends Activity {
         if (dashboard == null || trader == null) return;
 
         dashboard.setText(String.format(Locale.US,
-                "Demo balance: %.2f USDT | Open positions: %d | Realized P/L: %.2f",
-                trader.getBalance(),
-                trader.getOpenTradeCount(),
+                "Demo balance: %.2f USDT | Open: %d | Realized P/L: %.2f",
+                trader.getBalance(), trader.getOpenTradeCount(),
                 trader.getRealizedProfitLoss()));
     }
 
     private void showTrades() {
-        StringBuilder text = new StringBuilder();
-        text.append("SIMULATED TRADE HISTORY\n\n");
+        StringBuilder b = new StringBuilder("SIMULATED TRADE HISTORY\n\n");
 
         List<DemoTrader.Trade> trades = trader.getTradeHistory();
-
-        if (trades.isEmpty()) {
-            text.append("Abhi koi simulated trade nahi hai.");
-        }
+        if (trades.isEmpty()) b.append("No demo trades yet.\n");
 
         for (DemoTrader.Trade t : trades) {
-            text.append(t.symbol).append(" | ").append(t.side).append("\n");
-            text.append(String.format(Locale.US,
-                    "Entry: %.8f | SL: %.8f | TP: %.8f\n",
+            b.append(t.symbol).append(" | ").append(t.side).append("\n");
+            b.append(String.format(Locale.US,
+                    "Entry %.8f | SL %.8f | TP %.8f\n",
                     t.entryPrice, t.stopLoss, t.takeProfit));
 
             if (t.closed) {
-                text.append(String.format(Locale.US,
-                        "Exit: %.8f | P/L: %.4f | %s\n",
+                b.append(String.format(Locale.US,
+                        "Exit %.8f | P/L %.4f | %s\n",
                         t.exitPrice, t.profitLoss, t.exitReason));
             } else {
-                text.append("Status: OPEN — SIMULATED\n");
+                b.append("OPEN — SIMULATED\n");
             }
-            text.append("\n");
+            b.append("\n");
         }
 
-        output.setText(text.toString());
+        output.setText(b.toString());
         updateDashboard();
     }
 
@@ -324,9 +321,8 @@ public class MainActivity extends Activity {
         if (message.isEmpty()) return;
 
         String reply = assistant.reply(message);
-
-        chatTranscript += "You: " + message + "\n"
-                + "Assistant: " + reply + "\n\n";
+        chatTranscript += "You: " + message + "\nAssistant: "
+                + reply + "\n\n";
 
         chatLog.setText(chatTranscript);
         chatInput.setText("");
@@ -338,10 +334,8 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         running = false;
         handler.removeCallbacks(scanLoop);
-
         if (scanner != null) scanner.shutdown();
         worker.shutdownNow();
-
         super.onDestroy();
     }
 }
