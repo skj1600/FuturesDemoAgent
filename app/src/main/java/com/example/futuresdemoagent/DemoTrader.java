@@ -11,11 +11,9 @@ public class DemoTrader {
     public static class Trade {
         public final String symbol;
         public final String side;
-        public final double entryPrice;
-        public final double stopLoss;
-        public final double takeProfit;
-        public final double quantity;
+        public final double entryPrice, stopLoss, takeProfit, quantity;
         public final long entryTime;
+        public final double openingFee;
 
         public boolean closed;
         public double exitPrice;
@@ -23,15 +21,16 @@ public class DemoTrader {
         public String exitReason = "OPEN";
 
         Trade(String symbol, String side, double entry,
-              double stop, double target, double quantity) {
+              double stop, double target, double quantity,
+              double openingFee) {
             this.symbol = symbol;
             this.side = side;
             this.entryPrice = entry;
             this.stopLoss = stop;
             this.takeProfit = target;
             this.quantity = quantity;
+            this.openingFee = openingFee;
             this.entryTime = System.currentTimeMillis();
-            this.closed = false;
         }
     }
 
@@ -43,50 +42,57 @@ public class DemoTrader {
     private final double feeRate;
     private final RiskManager riskManager;
 
+    private long riskDay = System.currentTimeMillis() / 86400000L;
+
     public DemoTrader(double initialBalance) {
         this(initialBalance, 0.0005);
     }
 
     public DemoTrader(double initialBalance, double feeRate) {
-        this.balance = Math.max(0, initialBalance);
-        this.startingBalance = this.balance;
+        balance = Math.max(0, initialBalance);
+        startingBalance = balance;
         this.feeRate = Math.max(0, feeRate);
-        this.riskManager = new RiskManager(0.5, 2.0, this.balance);
+        riskManager = new RiskManager(0.5, 2.0, balance);
+    }
+
+    private void checkNewDay() {
+        long today = System.currentTimeMillis() / 86400000L;
+        if (today != riskDay) {
+            riskDay = today;
+            riskManager.resetDailyRisk(balance);
+        }
     }
 
     public synchronized Trade openTrade(
-            String symbol,
-            String side,
-            double entryPrice,
-            double stopLoss,
-            double takeProfit) {
+            String symbol, String side, double entryPrice,
+            double stopLoss, double takeProfit) {
 
-        if (symbol == null || symbol.trim().isEmpty()) return null;
-        if (side == null) return null;
+        checkNewDay();
+
+        if (symbol == null || symbol.trim().isEmpty()
+                || side == null || !finite(entryPrice)
+                || !finite(stopLoss) || !finite(takeProfit)) {
+            return null;
+        }
 
         String direction = side.trim().toUpperCase(Locale.US);
 
-        if (!direction.equals("LONG") && !direction.equals("SHORT")) {
+        if (!direction.equals("LONG") && !direction.equals("SHORT"))
             return null;
-        }
 
-        if (entryPrice <= 0 || stopLoss <= 0 || takeProfit <= 0) {
+        if (entryPrice <= 0 || stopLoss <= 0 || takeProfit <= 0)
             return null;
-        }
+
+        if (direction.equals("LONG")
+                && !(stopLoss < entryPrice && takeProfit > entryPrice))
+            return null;
+
+        if (direction.equals("SHORT")
+                && !(stopLoss > entryPrice && takeProfit < entryPrice))
+            return null;
 
         if (balance <= 0 || !riskManager.canTrade()) return null;
 
-        if (direction.equals("LONG")
-                && !(stopLoss < entryPrice && takeProfit > entryPrice)) {
-            return null;
-        }
-
-        if (direction.equals("SHORT")
-                && !(stopLoss > entryPrice && takeProfit < entryPrice)) {
-            return null;
-        }
-
-        // Prevent multiple simultaneous positions on the same symbol.
         for (Trade t : openTrades) {
             if (t.symbol.equalsIgnoreCase(symbol)) return null;
         }
@@ -94,54 +100,46 @@ public class DemoTrader {
         double quantity = riskManager.calculatePositionSize(
                 balance, entryPrice, stopLoss);
 
-        if (quantity <= 0) return null;
+        if (!finite(quantity) || quantity <= 0) return null;
 
-        double notional = quantity * entryPrice;
-        double openingFee = notional * feeRate;
+        double openingFee = quantity * entryPrice * feeRate;
+        if (!finite(openingFee) || openingFee >= balance) return null;
 
-        if (openingFee >= balance) return null;
-
-        Trade trade = new Trade(
-                symbol, direction, entryPrice,
-                stopLoss, takeProfit, quantity);
+        Trade trade = new Trade(symbol, direction, entryPrice,
+                stopLoss, takeProfit, quantity, openingFee);
 
         balance -= openingFee;
         openTrades.add(trade);
         history.add(trade);
 
+        // Reserve estimated loss at stop, including fees, against daily limit.
         return trade;
     }
 
-    /*
-     * Feed this method the latest market price.
-     * It simulates exits only; it does not send exchange orders.
-     */
     public synchronized void updatePrice(String symbol, double price) {
-        if (symbol == null || price <= 0) return;
+        checkNewDay();
+
+        if (symbol == null || !finite(price) || price <= 0) return;
 
         for (Trade t : new ArrayList<>(openTrades)) {
             if (!t.symbol.equalsIgnoreCase(symbol) || t.closed) continue;
 
             if (t.side.equals("LONG")) {
-                if (price <= t.stopLoss) {
+                if (price <= t.stopLoss)
                     closeTrade(t, t.stopLoss, "STOP LOSS");
-                } else if (price >= t.takeProfit) {
+                else if (price >= t.takeProfit)
                     closeTrade(t, t.takeProfit, "TAKE PROFIT");
-                }
             } else {
-                if (price >= t.stopLoss) {
+                if (price >= t.stopLoss)
                     closeTrade(t, t.stopLoss, "STOP LOSS");
-                } else if (price <= t.takeProfit) {
+                else if (price <= t.takeProfit)
                     closeTrade(t, t.takeProfit, "TAKE PROFIT");
-                }
             }
         }
     }
 
-    public synchronized boolean closeTrade(
-            String symbol, double price) {
-
-        if (symbol == null || price <= 0) return false;
+    public synchronized boolean closeTrade(String symbol, double price) {
+        if (symbol == null || !finite(price) || price <= 0) return false;
 
         for (Trade t : new ArrayList<>(openTrades)) {
             if (t.symbol.equalsIgnoreCase(symbol)) {
@@ -149,34 +147,29 @@ public class DemoTrader {
                 return true;
             }
         }
-
         return false;
     }
 
     private void closeTrade(Trade t, double exitPrice, String reason) {
         if (t.closed) return;
 
-        double gross;
-
-        if (t.side.equals("LONG")) {
-            gross = (exitPrice - t.entryPrice) * t.quantity;
-        } else {
-            gross = (t.entryPrice - exitPrice) * t.quantity;
-        }
+        double gross = t.side.equals("LONG")
+                ? (exitPrice - t.entryPrice) * t.quantity
+                : (t.entryPrice - exitPrice) * t.quantity;
 
         double closingFee = exitPrice * t.quantity * feeRate;
-        double net = gross - closingFee;
+        double net = gross - t.openingFee - closingFee;
 
         t.exitPrice = exitPrice;
         t.profitLoss = net;
         t.exitReason = reason;
         t.closed = true;
 
-        balance += net;
+        // Opening fee was already deducted at entry.
+        // Add back gross P/L minus closing fee only.
+        balance += gross - closingFee;
 
-        if (net < 0) {
-            riskManager.recordLoss(-net);
-        }
+        if (net < 0) riskManager.recordLoss(-net);
 
         openTrades.remove(t);
     }
@@ -191,11 +184,9 @@ public class DemoTrader {
 
     public synchronized double getRealizedProfitLoss() {
         double total = 0;
-
         for (Trade t : history) {
             if (t.closed) total += t.profitLoss;
         }
-
         return total;
     }
 
@@ -204,33 +195,34 @@ public class DemoTrader {
     }
 
     public synchronized List<Trade> getOpenTrades() {
-        return Collections.unmodifiableList(
-                new ArrayList<>(openTrades));
+        return Collections.unmodifiableList(new ArrayList<>(openTrades));
     }
 
     public synchronized List<Trade> getTradeHistory() {
-        return Collections.unmodifiableList(
-                new ArrayList<>(history));
+        return Collections.unmodifiableList(new ArrayList<>(history));
     }
 
     public synchronized double getWinRatePercent() {
-        int closed = 0;
-        int wins = 0;
-
+        int closed = 0, wins = 0;
         for (Trade t : history) {
             if (!t.closed) continue;
             closed++;
             if (t.profitLoss > 0) wins++;
         }
-
-        return closed == 0 ? 0 : (wins * 100.0 / closed);
+        return closed == 0 ? 0 : wins * 100.0 / closed;
     }
 
     public synchronized boolean canTrade() {
+        checkNewDay();
         return riskManager.canTrade();
     }
 
     public synchronized void resetDailyRisk() {
+        riskDay = System.currentTimeMillis() / 86400000L;
         riskManager.resetDailyRisk(balance);
+    }
+
+    private boolean finite(double value) {
+        return !Double.isNaN(value) && !Double.isInfinite(value);
     }
 }
