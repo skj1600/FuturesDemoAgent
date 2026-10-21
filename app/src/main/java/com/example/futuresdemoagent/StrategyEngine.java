@@ -31,36 +31,45 @@ public class StrategyEngine {
         this(70, 1.5);
     }
 
-    public StrategyEngine(double minimumScore, double minimumRiskReward) {
-        this.minimumScore = Math.max(50, Math.min(minimumScore, 95));
+    public StrategyEngine(double minimumScore,
+                          double minimumRiskReward) {
+        this.minimumScore = clamp(minimumScore, 50, 95);
         this.minimumRiskReward =
-                Math.max(1.0, Math.min(minimumRiskReward, 5.0));
+                clamp(minimumRiskReward, 1.0, 5.0);
     }
 
     public TradeSignal analyze(MarketData d) {
-        if (d == null || d.symbol == null || d.price <= 0
-                || !finite(d.price) || !finite(d.change24h)
-                || !finite(d.trend1m) || !finite(d.trend5m)
-                || !finite(d.trend15m) || !finite(d.momentum1m)
+        if (d == null || d.symbol == null || d.symbol.trim().isEmpty()
+                || !finite(d.price) || d.price <= 0
+                || !finite(d.change24h)
+                || !finite(d.trend1m)
+                || !finite(d.trend5m)
+                || !finite(d.trend15m)
+                || !finite(d.momentum1m)
                 || !finite(d.volumeRatio) || d.volumeRatio < 0) {
             return waitSignal(d, "Invalid market data");
         }
 
-        boolean bullish = d.trend1m > 0 && d.trend5m > 0
-                && d.trend15m > 0 && d.momentum1m > 0;
-        boolean bearish = d.trend1m < 0 && d.trend5m < 0
-                && d.trend15m < 0 && d.momentum1m < 0;
-
-        if (!bullish && !bearish) {
-            return waitSignal(d, "Timeframes or momentum disagree");
+        if (Math.abs(d.change24h) > 8) {
+            return waitSignal(d, "24h move too extended");
         }
 
         if (d.volumeRatio < 1.2) {
             return waitSignal(d, "Volume confirmation missing");
         }
 
-        if (Math.abs(d.change24h) > 8) {
-            return waitSignal(d, "24h move too extended");
+        int bullishCount = countBullish(d);
+        int bearishCount = 3 - bullishCount;
+
+        boolean momentumBullish = d.momentum1m > 0;
+        boolean momentumBearish = d.momentum1m < 0;
+
+        boolean bullish = bullishCount >= 2 && momentumBullish;
+        boolean bearish = bearishCount >= 2 && momentumBearish;
+
+        if (!bullish && !bearish) {
+            return waitSignal(d,
+                    "Need 2 timeframe alignment and matching momentum");
         }
 
         double score = calculateScore(d, bullish);
@@ -74,46 +83,58 @@ public class StrategyEngine {
                 : TradeSignal.Direction.SHORT;
 
         return createSignal(d, direction, score,
-                "Trend aligned; momentum and volume confirmed");
+                "Trend alignment, momentum and volume confirmed");
+    }
+
+    private int countBullish(MarketData d) {
+        int count = 0;
+        if (d.trend1m > 0) count++;
+        if (d.trend5m > 0) count++;
+        if (d.trend15m > 0) count++;
+        return count;
     }
 
     private double calculateScore(MarketData d, boolean bullish) {
-        double score = 40;
+        int aligned = bullish ? countBullish(d) : 3 - countBullish(d);
 
-        // Trend alignment
-        score += 20;
+        double score = 45;
 
-        // Momentum must support the selected direction.
-        double alignedMomentum = bullish
+        if (aligned == 3) score += 15;
+        else if (aligned == 2) score += 8;
+
+        double momentum = bullish
                 ? d.momentum1m : -d.momentum1m;
 
-        if (alignedMomentum > 0.05) score += 12;
-        else if (alignedMomentum > 0) score += 7;
+        if (momentum > 0.15) score += 12;
+        else if (momentum > 0.05) score += 8;
+        else if (momentum > 0) score += 4;
 
-        // Stronger volume confirmation receives a larger score.
         if (d.volumeRatio >= 2.0) score += 18;
-        else if (d.volumeRatio >= 1.5) score += 14;
-        else if (d.volumeRatio >= 1.2) score += 8;
+        else if (d.volumeRatio >= 1.5) score += 13;
+        else if (d.volumeRatio >= 1.2) score += 7;
 
-        // Penalize very weak EMA separation.
-        double trendStrength = Math.min(
+        double weakestTrend = Math.min(
                 Math.abs(d.trend1m),
-                Math.min(Math.abs(d.trend5m), Math.abs(d.trend15m)));
+                Math.min(Math.abs(d.trend5m),
+                        Math.abs(d.trend15m)));
 
-        if (trendStrength < 0.03) score -= 12;
-        else if (trendStrength < 0.08) score -= 5;
+        if (weakestTrend < 0.03) score -= 8;
 
         return Math.max(0, Math.min(100, score));
     }
 
     private TradeSignal createSignal(
-            MarketData d, TradeSignal.Direction direction,
-            double score, String reason) {
+            MarketData d,
+            TradeSignal.Direction direction,
+            double score,
+            String reason) {
 
         double stopDistance = d.price * 0.005;
-        double targetDistance = stopDistance * minimumRiskReward;
+        double targetDistance =
+                stopDistance * minimumRiskReward;
 
-        double stop, target;
+        double stop;
+        double target;
 
         if (direction == TradeSignal.Direction.LONG) {
             stop = d.price - stopDistance;
@@ -125,22 +146,35 @@ public class StrategyEngine {
 
         TradeSignal.Confidence confidence = score >= 85
                 ? TradeSignal.Confidence.HIGH
-                : score >= 75 ? TradeSignal.Confidence.MEDIUM
+                : score >= 75
+                ? TradeSignal.Confidence.MEDIUM
                 : TradeSignal.Confidence.LOW;
 
-        return new TradeSignal(d.symbol, direction, confidence,
+        return new TradeSignal(
+                d.symbol, direction, confidence,
                 d.price, stop, target, score, reason);
     }
 
     private TradeSignal waitSignal(MarketData d, String reason) {
-        String symbol = d == null || d.symbol == null ? "" : d.symbol;
-        double price = d == null || !finite(d.price) ? 0 : d.price;
+        String symbol =
+                d == null || d.symbol == null ? "" : d.symbol;
+        double price =
+                d == null || !finite(d.price) || d.price < 0
+                        ? 0 : d.price;
 
-        return new TradeSignal(symbol, TradeSignal.Direction.WAIT,
-                TradeSignal.Confidence.LOW, price, 0, 0, 0, reason);
+        return new TradeSignal(
+                symbol, TradeSignal.Direction.WAIT,
+                TradeSignal.Confidence.LOW,
+                price, 0, 0, 0, reason);
     }
 
-    private boolean finite(double value) {
+    private static boolean finite(double value) {
         return !Double.isNaN(value) && !Double.isInfinite(value);
+    }
+
+    private static double clamp(
+            double value, double min, double max) {
+        if (!finite(value)) return min;
+        return Math.max(min, Math.min(value, max));
     }
 }
