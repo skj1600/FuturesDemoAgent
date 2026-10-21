@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Color;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.*;
 
 import java.util.*;
@@ -49,7 +50,12 @@ public class MainActivity extends Activity {
         super.onCreate(state);
 
         settings = new AppSettings(this);
-        trader = new DemoTrader(settings.getDemoBalance());
+
+        trader = new DemoTrader(
+                settings.getDemoBalance(),
+                settings.getRiskPercent(),
+                settings.getDailyLossLimitPercent());
+
         assistant = new ChatAssistant();
 
         aiEngine = new AiEngine(
@@ -130,6 +136,7 @@ public class MainActivity extends Activity {
                 new LinearLayout.LayoutParams(-1, 0, 1));
 
         chatLog = makeText("", 13, Color.WHITE);
+
         chatInput = new EditText(this);
         chatInput.setSingleLine(false);
         chatInput.setHint("Ask about signals or trades...");
@@ -186,11 +193,11 @@ public class MainActivity extends Activity {
         if ("chat".equals(page)) {
             output.setText(
                     "Offline assistant. Chat integration is basic.");
-            chatLog.setVisibility(android.view.View.VISIBLE);
-            chatInput.setVisibility(android.view.View.VISIBLE);
+            chatLog.setVisibility(View.VISIBLE);
+            chatInput.setVisibility(View.VISIBLE);
         } else {
-            chatLog.setVisibility(android.view.View.GONE);
-            chatInput.setVisibility(android.view.View.GONE);
+            chatLog.setVisibility(View.GONE);
+            chatInput.setVisibility(View.GONE);
 
             if ("trades".equals(page)) {
                 showTrades();
@@ -239,6 +246,7 @@ public class MainActivity extends Activity {
                 }
 
                 int newTrades = 0;
+
                 AiEngine.Candidate best =
                         ranked.isEmpty() ? null : ranked.get(0);
 
@@ -252,7 +260,9 @@ public class MainActivity extends Activity {
                             s.stopLoss,
                             s.takeProfit);
 
-                    if (trade != null) newTrades++;
+                    if (trade != null) {
+                        newTrades++;
+                    }
                 }
 
                 StringBuilder b = new StringBuilder();
@@ -263,6 +273,10 @@ public class MainActivity extends Activity {
                         .append(ranked.size())
                         .append("\nNew demo trades: ")
                         .append(newTrades)
+                        .append("\nReserved open risk: ")
+                        .append(String.format(
+                                Locale.US, "%.4f USDT",
+                                trader.getReservedRiskAmount()))
                         .append("\n\n");
 
                 if (best == null) {
@@ -398,7 +412,9 @@ public class MainActivity extends Activity {
         running = false;
         handler.removeCallbacks(scanLoop);
 
-        if (scanner != null) scanner.shutdown();
+        if (scanner != null) {
+            scanner.shutdown();
+        }
 
         worker.shutdownNow();
         super.onDestroy();
