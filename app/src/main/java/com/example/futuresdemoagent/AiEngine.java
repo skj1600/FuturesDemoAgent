@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 public class AiEngine {
 
@@ -16,10 +17,8 @@ public class AiEngine {
     }
 
     public AiEngine(double minimumScore, double minimumRiskReward) {
-        this.minimumScore = Math.max(50,
-                Math.min(minimumScore, 95));
-        this.minimumRiskReward = Math.max(1.0,
-                Math.min(minimumRiskReward, 5.0));
+        this.minimumScore = clamp(minimumScore, 50, 95);
+        this.minimumRiskReward = clamp(minimumRiskReward, 1.0, 5.0);
     }
 
     public static class Candidate {
@@ -27,46 +26,41 @@ public class AiEngine {
         public final double volumeRatio;
         public final double trendAlignment;
 
-        public Candidate(
-                TradeSignal signal,
-                double volumeRatio,
-                double trendAlignment) {
+        public Candidate(TradeSignal signal,
+                         double volumeRatio,
+                         double trendAlignment) {
             this.signal = signal;
             this.volumeRatio = volumeRatio;
             this.trendAlignment = trendAlignment;
         }
     }
 
-    public List<Candidate> rankCandidates(
-            List<Candidate> candidates) {
-
+    public List<Candidate> rankCandidates(List<Candidate> candidates) {
         if (candidates == null || candidates.isEmpty()) {
             return Collections.emptyList();
         }
 
-        ArrayList<Candidate> valid = new ArrayList<>();
+        List<Candidate> valid = new ArrayList<>();
 
-        for (Candidate candidate : candidates) {
-            if (candidate == null || candidate.signal == null) {
-                continue;
-            }
+        for (Candidate c : candidates) {
+            if (c == null || c.signal == null) continue;
 
-            TradeSignal s = candidate.signal;
+            TradeSignal s = c.signal;
 
             if (!s.isTradeCandidate()) continue;
-            if (s.score < minimumScore) continue;
+            if (!finite(c.volumeRatio) || c.volumeRatio < 1.2) continue;
+            if (!finite(c.trendAlignment)
+                    || c.trendAlignment < 0.99) continue;
+            if (!finite(s.score) || s.score < minimumScore) continue;
             if (s.getRiskRewardRatio() < minimumRiskReward) continue;
-            if (candidate.volumeRatio < 1.2) continue;
-            if (candidate.trendAlignment < 0.75) continue;
 
-            valid.add(candidate);
+            valid.add(c);
         }
 
         valid.sort(new Comparator<Candidate>() {
             @Override
             public int compare(Candidate a, Candidate b) {
-                return Double.compare(
-                        calculateQuality(b),
+                return Double.compare(calculateQuality(b),
                         calculateQuality(a));
             }
         });
@@ -77,47 +71,45 @@ public class AiEngine {
     public double calculateQuality(Candidate c) {
         if (c == null || c.signal == null) return 0;
 
-        double score = c.signal.score;
+        double volumeBonus = Math.min(12,
+                Math.max(0, c.volumeRatio - 1.0) * 6);
 
-        double volumeBonus = Math.min(
-                10, Math.max(0, c.volumeRatio - 1) * 5);
+        double alignmentBonus = Math.min(10,
+                Math.max(0, c.trendAlignment) * 10);
 
-        double alignmentBonus = Math.min(
-                10, Math.max(0, c.trendAlignment) * 10);
+        double rr = c.signal.getRiskRewardRatio();
+        double rrBonus = Math.min(10, Math.max(0, rr - 1.0) * 5);
 
-        double rrBonus = Math.min(
-                10, c.signal.getRiskRewardRatio() * 3);
-
-        return Math.min(
-                100, score + volumeBonus
-                + alignmentBonus + rrBonus);
+        return Math.min(100,
+                c.signal.score + volumeBonus
+                        + alignmentBonus + rrBonus);
     }
 
     public Candidate selectBest(List<Candidate> candidates) {
         List<Candidate> ranked = rankCandidates(candidates);
-
-        if (ranked.isEmpty()) return null;
-
-        return ranked.get(0);
+        return ranked.isEmpty() ? null : ranked.get(0);
     }
 
     public String explain(Candidate candidate) {
         if (candidate == null || candidate.signal == null) {
-            return "Abhi koi valid setup nahi mila. WAIT.";
+            return "Koi setup filters pass nahi kar raha. WAIT.";
         }
 
         TradeSignal s = candidate.signal;
 
-        return s.symbol + " | " + s.direction
-                + " | Score: " + s.score
-                + " | Risk/Reward: "
-                + String.format(
-                        java.util.Locale.US, "%.2f",
-                        s.getRiskRewardRatio())
-                + " | Volume ratio: "
-                + String.format(
-                        java.util.Locale.US, "%.2f",
-                        candidate.volumeRatio)
-                + " | Reason: " + s.reason;
+        return String.format(Locale.US,
+                "%s | %s | Score %.1f | RR %.2f | Volume %.2fx | Alignment %.0f%% | %s",
+                s.symbol, s.direction, s.score,
+                s.getRiskRewardRatio(), candidate.volumeRatio,
+                candidate.trendAlignment * 100, s.reason);
+    }
+
+    private static boolean finite(double v) {
+        return !Double.isNaN(v) && !Double.isInfinite(v);
+    }
+
+    private static double clamp(double value, double min, double max) {
+        if (!finite(value)) return min;
+        return Math.max(min, Math.min(value, max));
     }
 }
