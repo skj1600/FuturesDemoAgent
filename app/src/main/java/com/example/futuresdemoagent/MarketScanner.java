@@ -13,6 +13,7 @@ public class MarketScanner {
     private final ExecutorService executor =
             Executors.newFixedThreadPool(3);
 
+    private final double minimumVolumeUsdt;
     private volatile boolean cancelled = false;
 
     public static class ScanResult {
@@ -23,9 +24,13 @@ public class MarketScanner {
         public final double volumeRatio;
         public final double trendAlignment;
 
-        public ScanResult(TradeSignal signal, double price,
-                double change24h, double quoteVolume,
-                double volumeRatio, double trendAlignment) {
+        public ScanResult(
+                TradeSignal signal,
+                double price,
+                double change24h,
+                double quoteVolume,
+                double volumeRatio,
+                double trendAlignment) {
             this.signal = signal;
             this.price = price;
             this.change24h = change24h;
@@ -36,8 +41,19 @@ public class MarketScanner {
     }
 
     public MarketScanner() {
+        this(5_000_000.0, 70.0);
+    }
+
+    public MarketScanner(double minimumVolumeUsdt,
+                         double minimumScore) {
+        this.minimumVolumeUsdt =
+                Double.isNaN(minimumVolumeUsdt)
+                || Double.isInfinite(minimumVolumeUsdt)
+                ? 5_000_000.0
+                : Math.max(0, minimumVolumeUsdt);
+
         marketClient = new MarketDataClient();
-        strategy = new StrategyEngine();
+        strategy = new StrategyEngine(minimumScore, 1.5);
     }
 
     public void stopScan() {
@@ -68,8 +84,12 @@ public class MarketScanner {
         List<MarketDataClient.Ticker> eligible = new ArrayList<>();
 
         for (MarketDataClient.Ticker t : tickers) {
-            if (cancelled) break;
-            if (t.price > 0 && t.quoteVolume >= 5_000_000) {
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                break;
+            }
+
+            if (t.price > 0
+                    && t.quoteVolume >= minimumVolumeUsdt) {
                 eligible.add(t);
             }
         }
@@ -85,7 +105,7 @@ public class MarketScanner {
         List<ScanResult> results = new ArrayList<>();
 
         for (Future<ScanResult> future : futures) {
-            if (cancelled) {
+            if (cancelled || Thread.currentThread().isInterrupted()) {
                 future.cancel(true);
                 continue;
             }
@@ -93,6 +113,10 @@ public class MarketScanner {
             try {
                 ScanResult result = future.get(40, TimeUnit.SECONDS);
                 if (result != null) results.add(result);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.cancel(true);
+                break;
             } catch (Exception e) {
                 future.cancel(true);
             }
@@ -112,17 +136,19 @@ public class MarketScanner {
         try {
             List<MarketDataClient.Candle> one =
                     marketClient.getCandles(ticker.symbol, "1m", 30);
-            List<MarketDataClient.Candle> five =
-                    marketClient.getCandles(ticker.symbol, "5m", 30);
-            List<MarketDataClient.Candle> fifteen =
-                    marketClient.getCandles(ticker.symbol, "15m", 30);
-
-            if (cancelled || one.size() < 25
-                    || five.size() < 25 || fifteen.size() < 25) {
+            if (cancelled || Thread.currentThread().isInterrupted()) {
                 return null;
             }
 
-            // Remove candles that have not closed yet.
+            List<MarketDataClient.Candle> five =
+                    marketClient.getCandles(ticker.symbol, "5m", 30);
+            if (cancelled || Thread.currentThread().isInterrupted()) {
+                return null;
+            }
+
+            List<MarketDataClient.Candle> fifteen =
+                    marketClient.getCandles(ticker.symbol, "15m", 30);
+
             long now = System.currentTimeMillis();
             one = closedCandles(one, now);
             five = closedCandles(five, now);
@@ -148,6 +174,7 @@ public class MarketScanner {
             TradeSignal signal = strategy.analyze(data);
 
             double alignment = 0;
+
             if (signal.direction == TradeSignal.Direction.LONG) {
                 alignment = ((t1 > 0 ? 1 : 0)
                         + (t5 > 0 ? 1 : 0)
@@ -158,10 +185,13 @@ public class MarketScanner {
                         + (t15 < 0 ? 1 : 0)) / 3.0;
             }
 
-            return new ScanResult(signal, ticker.price,
-                    ticker.change24h, ticker.quoteVolume,
-                    volumeRatio, alignment);
+            return new ScanResult(
+                    signal, ticker.price, ticker.change24h,
+                    ticker.quoteVolume, volumeRatio, alignment);
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
         } catch (Exception e) {
             return null;
         }
@@ -169,10 +199,12 @@ public class MarketScanner {
 
     private List<MarketDataClient.Candle> closedCandles(
             List<MarketDataClient.Candle> candles, long now) {
-
         List<MarketDataClient.Candle> closed = new ArrayList<>();
+
         for (MarketDataClient.Candle candle : candles) {
-            if (candle.closeTime < now) closed.add(candle);
+            if (candle.closeTime < now) {
+                closed.add(candle);
+            }
         }
         return closed;
     }
@@ -182,12 +214,14 @@ public class MarketScanner {
             int fastPeriod, int slowPeriod) {
 
         double[] closes = new double[candles.size()];
+
         for (int i = 0; i < candles.size(); i++) {
             closes[i] = candles.get(i).close;
         }
 
         double fast = ema(closes, fastPeriod);
         double slow = ema(closes, slowPeriod);
+
         return slow <= 0 ? 0 : (fast / slow - 1.0) * 100.0;
     }
 
@@ -196,10 +230,12 @@ public class MarketScanner {
 
         int last = candles.size() - 1;
         int previous = last - lookback;
+
         if (previous < 0) return 0;
 
         double oldPrice = candles.get(previous).close;
         double newPrice = candles.get(last).close;
+
         return oldPrice <= 0 ? 0
                 : (newPrice / oldPrice - 1.0) * 100.0;
     }
@@ -216,12 +252,14 @@ public class MarketScanner {
         for (int i = size - 3; i < size; i++) {
             recent += candles.get(i).volume;
         }
+
         for (int i = size - 18; i < size - 3; i++) {
             baseline += candles.get(i).volume;
         }
 
         recent /= 3.0;
         baseline /= 15.0;
+
         return baseline > 0 ? recent / baseline : 0;
     }
 
@@ -232,8 +270,10 @@ public class MarketScanner {
         double alpha = 2.0 / (period + 1.0);
 
         for (int i = 1; i < values.length; i++) {
-            result = alpha * values[i] + (1.0 - alpha) * result;
+            result = alpha * values[i]
+                    + (1.0 - alpha) * result;
         }
+
         return result;
     }
 
