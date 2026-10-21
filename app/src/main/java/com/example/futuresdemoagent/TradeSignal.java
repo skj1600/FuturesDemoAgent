@@ -36,10 +36,14 @@ public class TradeSignal {
     public boolean isTradeCandidate() {
         if (direction == Direction.WAIT
                 || symbol.isEmpty()
-                || !finite(entryPrice) || !finite(stopLoss)
-                || !finite(takeProfit) || !finite(score)
-                || entryPrice <= 0 || stopLoss <= 0
-                || takeProfit <= 0 || score < 70) {
+                || !finite(entryPrice)
+                || !finite(stopLoss)
+                || !finite(takeProfit)
+                || !finite(score)
+                || entryPrice <= 0
+                || stopLoss <= 0
+                || takeProfit <= 0
+                || score < 50) {
             return false;
         }
 
@@ -65,7 +69,9 @@ public class TradeSignal {
         double risk = Math.abs(entryPrice - stopLoss);
         double reward = Math.abs(takeProfit - entryPrice);
 
-        if (risk <= 0 || !finite(risk) || !finite(reward)) return 0;
+        if (risk <= 0 || !finite(risk) || !finite(reward)) {
+            return 0;
+        }
 
         return reward / risk;
     }
