@@ -50,9 +50,11 @@ public class AiEngine {
             if (!s.isTradeCandidate()) continue;
             if (!finite(c.volumeRatio) || c.volumeRatio < 1.2) continue;
             if (!finite(c.trendAlignment)
-                    || c.trendAlignment < 0.99) continue;
+                    || c.trendAlignment < (2.0 / 3.0)) continue;
             if (!finite(s.score) || s.score < minimumScore) continue;
-            if (s.getRiskRewardRatio() < minimumRiskReward) continue;
+
+            double rr = s.getRiskRewardRatio();
+            if (!finite(rr) || rr < minimumRiskReward) continue;
 
             valid.add(c);
         }
@@ -60,8 +62,8 @@ public class AiEngine {
         valid.sort(new Comparator<Candidate>() {
             @Override
             public int compare(Candidate a, Candidate b) {
-                return Double.compare(calculateQuality(b),
-                        calculateQuality(a));
+                return Double.compare(
+                        calculateQuality(b), calculateQuality(a));
             }
         });
 
@@ -71,14 +73,15 @@ public class AiEngine {
     public double calculateQuality(Candidate c) {
         if (c == null || c.signal == null) return 0;
 
-        double volumeBonus = Math.min(12,
-                Math.max(0, c.volumeRatio - 1.0) * 6);
+        double volumeBonus = Math.min(
+                12, Math.max(0, c.volumeRatio - 1.0) * 6);
 
-        double alignmentBonus = Math.min(10,
-                Math.max(0, c.trendAlignment) * 10);
+        double alignmentBonus = Math.min(
+                10, Math.max(0, c.trendAlignment) * 10);
 
         double rr = c.signal.getRiskRewardRatio();
-        double rrBonus = Math.min(10, Math.max(0, rr - 1.0) * 5);
+        double rrBonus = Math.min(
+                10, Math.max(0, rr - 1.0) * 5);
 
         return Math.min(100,
                 c.signal.score + volumeBonus
@@ -98,14 +101,15 @@ public class AiEngine {
         TradeSignal s = candidate.signal;
 
         return String.format(Locale.US,
-                "%s | %s | Score %.1f | RR %.2f | Volume %.2fx | Alignment %.0f%% | %s",
+                "%s | %s | Score %.1f | RR %.2f | Volume %.2fx"
+                        + " | Alignment %.0f%% | %s",
                 s.symbol, s.direction, s.score,
                 s.getRiskRewardRatio(), candidate.volumeRatio,
                 candidate.trendAlignment * 100, s.reason);
     }
 
-    private static boolean finite(double v) {
-        return !Double.isNaN(v) && !Double.isInfinite(v);
+    private static boolean finite(double value) {
+        return !Double.isNaN(value) && !Double.isInfinite(value);
     }
 
     private static double clamp(double value, double min, double max) {
