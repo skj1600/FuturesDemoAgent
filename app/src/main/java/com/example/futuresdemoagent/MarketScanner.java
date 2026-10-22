@@ -15,29 +15,13 @@ public class MarketScanner {
 
     private final double minimumVolumeUsdt;
     private volatile boolean cancelled = false;
+    private volatile String lastScanMessage = "Ready";
+    private volatile String lastError = "";
+    private volatile int analyzedCount = 0;
+    private volatile int failedCount = 0;
 
-    public static class ScanResult {
-        public final TradeSignal signal;
-        public final double price;
-        public final double change24h;
-        public final double quoteVolume;
-        public final double volumeRatio;
-        public final double trendAlignment;
-
-        public ScanResult(
-                TradeSignal signal,
-                double price,
-                double change24h,
-                double quoteVolume,
-                double volumeRatio,
-                double trendAlignment) {
-            this.signal = signal;
-            this.price = price;
-            this.change24h = change24h;
-            this.quoteVolume = quoteVolume;
-            this.volumeRatio = volumeRatio;
-            this.trendAlignment = trendAlignment;
-        }
+    public String getLastScanMessage() {
+        return lastScanMessage;
     }
 
     public MarketScanner() {
@@ -58,6 +42,7 @@ public class MarketScanner {
 
     public void stopScan() {
         cancelled = true;
+        lastScanMessage = "Scan cancelled by user.";
     }
 
     public void startScan() {
@@ -73,13 +58,30 @@ public class MarketScanner {
         }
 
         if (executor.isShutdown()) {
-            throw new IllegalStateException("Scanner is shut down");
+            throw new IllegalStateException(
+                    "Scanner stopped. Restart the app.");
         }
 
         cancelled = false;
+        lastError = "";
+        analyzedCount = 0;
+        failedCount = 0;
+        lastScanMessage = "Connecting to Binance Futures...";
 
-        List<MarketDataClient.Ticker> tickers =
-                marketClient.getUsdtPerpetualTickers();
+        List<MarketDataClient.Ticker> tickers;
+
+        try {
+            tickers = marketClient.getUsdtPerpetualTickers();
+        } catch (Exception e) {
+            lastError = errorText(e);
+            lastScanMessage = "Binance market data failed: " + lastError;
+            throw new Exception(lastScanMessage, e);
+        }
+
+        if (tickers.isEmpty()) {
+            lastScanMessage = "Binance returned zero eligible USDT perpetual markets.";
+            return Collections.emptyList();
+        }
 
         List<MarketDataClient.Ticker> eligible = new ArrayList<>();
 
@@ -88,14 +90,18 @@ public class MarketScanner {
                 break;
             }
 
-            if (t.price > 0
-                    && t.quoteVolume >= minimumVolumeUsdt) {
+            if (t.price > 0 && t.quoteVolume >= minimumVolumeUsdt) {
                 eligible.add(t);
             }
         }
 
-        List<Future<ScanResult>> futures = new ArrayList<>();
         int limit = Math.min(maxMarkets, eligible.size());
+
+        lastScanMessage = "Markets: " + tickers.size()
+                + " | Volume-qualified: " + eligible.size()
+                + " | Scanning: " + limit;
+
+        List<Future<ScanResult>> futures = new ArrayList<>();
 
         for (int i = 0; i < limit && !cancelled; i++) {
             final MarketDataClient.Ticker ticker = eligible.get(i);
@@ -111,19 +117,47 @@ public class MarketScanner {
             }
 
             try {
-                ScanResult result = future.get(40, TimeUnit.SECONDS);
-                if (result != null) results.add(result);
+                ScanResult result = future.get(45, TimeUnit.SECONDS);
+                if (result != null) {
+                    results.add(result);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 future.cancel(true);
                 break;
-            } catch (Exception e) {
+            } catch (TimeoutException e) {
+                failedCount++;
                 future.cancel(true);
+                rememberError("Candle request timed out");
+            } catch (ExecutionException e) {
+                failedCount++;
+                rememberError(errorText(e.getCause() == null
+                        ? e : e.getCause()));
+            } catch (Exception e) {
+                failedCount++;
+                future.cancel(true);
+                rememberError(errorText(e));
             }
         }
 
         results.sort((a, b) ->
                 Double.compare(b.signal.score, a.signal.score));
+
+        if (cancelled) {
+            lastScanMessage = "Scan cancelled.";
+        } else if (!results.isEmpty()) {
+            lastScanMessage = "Scan complete. Analyzed: "
+                    + analyzedCount + " | Results: " + results.size()
+                    + " | Candle errors: " + failedCount;
+        } else if (!lastError.isEmpty()) {
+            lastScanMessage = "No results. Analyzed: " + analyzedCount
+                    + " | Errors: " + failedCount
+                    + " | First error: " + lastError;
+        } else {
+            lastScanMessage = "No setups passed the filters. Markets checked: "
+                    + limit + " | Valid analyses: " + analyzedCount
+                    + " | Try again when market conditions change.";
+        }
 
         return Collections.unmodifiableList(results);
     }
@@ -135,19 +169,21 @@ public class MarketScanner {
 
         try {
             List<MarketDataClient.Candle> one =
-                    marketClient.getCandles(ticker.symbol, "1m", 30);
+                    marketClient.getCandles(ticker.symbol, "1m", 40);
+
             if (cancelled || Thread.currentThread().isInterrupted()) {
                 return null;
             }
 
             List<MarketDataClient.Candle> five =
-                    marketClient.getCandles(ticker.symbol, "5m", 30);
+                    marketClient.getCandles(ticker.symbol, "5m", 40);
+
             if (cancelled || Thread.currentThread().isInterrupted()) {
                 return null;
             }
 
             List<MarketDataClient.Candle> fifteen =
-                    marketClient.getCandles(ticker.symbol, "15m", 30);
+                    marketClient.getCandles(ticker.symbol, "15m", 40);
 
             long now = System.currentTimeMillis();
             one = closedCandles(one, now);
@@ -156,6 +192,9 @@ public class MarketScanner {
 
             if (one.size() < 25 || five.size() < 25
                     || fifteen.size() < 25) {
+                failedCount++;
+                rememberError("Insufficient closed candles for "
+                        + ticker.symbol);
                 return null;
             }
 
@@ -172,6 +211,14 @@ public class MarketScanner {
                             momentum, volumeRatio);
 
             TradeSignal signal = strategy.analyze(data);
+            if (signal == null) {
+                failedCount++;
+                rememberError("Strategy returned no signal for "
+                        + ticker.symbol);
+                return null;
+            }
+
+            analyzedCount++;
 
             double alignment = 0;
 
@@ -193,8 +240,27 @@ public class MarketScanner {
             Thread.currentThread().interrupt();
             return null;
         } catch (Exception e) {
+            failedCount++;
+            rememberError(ticker.symbol + ": " + errorText(e));
             return null;
         }
+    }
+
+    private synchronized void rememberError(String message) {
+        if (lastError.isEmpty() && message != null) {
+            lastError = message;
+        }
+    }
+
+    private String errorText(Throwable e) {
+        if (e == null) return "Unknown error";
+
+        String message = e.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return e.getClass().getSimpleName();
+        }
+
+        return e.getClass().getSimpleName() + ": " + message;
     }
 
     private List<MarketDataClient.Candle> closedCandles(
@@ -280,5 +346,29 @@ public class MarketScanner {
     public void shutdown() {
         cancelled = true;
         executor.shutdownNow();
+    }
+
+    public static class ScanResult {
+        public final TradeSignal signal;
+        public final double price;
+        public final double change24h;
+        public final double quoteVolume;
+        public final double volumeRatio;
+        public final double trendAlignment;
+
+        public ScanResult(
+                TradeSignal signal,
+                double price,
+                double change24h,
+                double quoteVolume,
+                double volumeRatio,
+                double trendAlignment) {
+            this.signal = signal;
+            this.price = price;
+            this.change24h = change24h;
+            this.quoteVolume = quoteVolume;
+            this.volumeRatio = volumeRatio;
+            this.trendAlignment = trendAlignment;
+        }
     }
 }
