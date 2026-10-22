@@ -164,6 +164,7 @@ public class MainActivity extends Activity {
 
     private void showPage(String page) {
         currentPage = page;
+
         if ("chat".equals(page)) {
             output.setText("Offline assistant. Chat integration is basic.");
             chatLog.setVisibility(View.VISIBLE);
@@ -171,6 +172,7 @@ public class MainActivity extends Activity {
         } else {
             chatLog.setVisibility(View.GONE);
             chatInput.setVisibility(View.GONE);
+
             if ("trades".equals(page)) {
                 showTrades();
             } else {
@@ -184,6 +186,7 @@ public class MainActivity extends Activity {
             status.setText("Scan already running. Please wait.");
             return;
         }
+
         if (worker.isShutdown()) {
             status.setText("Worker stopped. Restart the app.");
             return;
@@ -193,7 +196,8 @@ public class MainActivity extends Activity {
         scanButton.setEnabled(false);
         scanButton.setText("SCANNING...");
         status.setText("Connecting to Binance Futures...");
-        output.setText("Fetching market data. Please wait...");
+        status.setTextColor(Color.YELLOW);
+        output.setText("Fetching Binance market data...\nPlease wait.");
 
         try {
             worker.execute(() -> {
@@ -208,6 +212,7 @@ public class MainActivity extends Activity {
 
                     for (MarketScanner.ScanResult r : results) {
                         if (r == null || r.signal == null) continue;
+
                         if (r.signal.isTradeCandidate()) {
                             candidates.add(new AiEngine.Candidate(
                                     r.signal, r.volumeRatio, r.trendAlignment));
@@ -236,30 +241,44 @@ public class MainActivity extends Activity {
                     }
 
                     StringBuilder b = new StringBuilder();
-                    b.append("Markets analyzed: ").append(results.size())
+
+                    b.append("SCAN DIAGNOSTICS\n")
+                            .append(scanner.getLastScanMessage())
+                            .append("\n\n");
+
+                    b.append("Results returned: ").append(results.size())
                             .append("\nQualified setups: ").append(ranked.size())
-                            .append("\nNew demo trades: ").append(newTrades)
+                            .append("\nNew simulated trades: ").append(newTrades)
                             .append("\nReserved open risk: ")
                             .append(String.format(Locale.US, "%.4f USDT",
                                     trader.getReservedRiskAmount()))
                             .append("\n\n");
 
                     if (best == null) {
-                        b.append("No setup passed filters. WAIT.\n\n");
+                        b.append("NO QUALIFIED SETUP\n")
+                                .append("WAIT — no trade opened.\n\n");
                     } else {
                         b.append("TOP SETUP\n")
-                                .append(aiEngine.explain(best)).append("\n\n");
+                                .append(aiEngine.explain(best))
+                                .append("\n\n");
+                    }
+
+                    if (results.isEmpty()) {
+                        b.append("No market results were returned.\n")
+                                .append("Read SCAN DIAGNOSTICS above.\n");
                     }
 
                     for (MarketScanner.ScanResult r : results) {
                         if (r == null || r.signal == null) continue;
+
                         TradeSignal s = r.signal;
+
                         b.append(s.symbol).append(" | ")
                                 .append(s.direction).append(" | Score ")
                                 .append(String.format(Locale.US, "%.0f", s.score))
                                 .append("\n").append(s.reason).append("\n")
                                 .append(String.format(Locale.US,
-                                        "Price %.8f | 24h %+.2f%% | Volume %.1fM\n",
+                                        "Price %.8f | 24h %+.2f%% | Volume %.1fM USDT\n",
                                         r.price, r.change24h,
                                         r.quoteVolume / 1_000_000.0));
 
@@ -270,14 +289,17 @@ public class MainActivity extends Activity {
                         }
                         b.append("\n");
                     }
+
                     display = b.toString();
 
                 } catch (Exception e) {
                     failed = true;
-                    display = "SCAN FAILED\n"
+                    display = "SCAN FAILED\n\n"
                             + e.getClass().getSimpleName() + "\n"
                             + String.valueOf(e.getMessage())
-                            + "\n\nCheck internet connection and try again.";
+                            + "\n\nScanner status:\n"
+                            + scanner.getLastScanMessage()
+                            + "\n\nCheck internet and try again.";
                 }
 
                 final String finalDisplay = display;
@@ -287,14 +309,18 @@ public class MainActivity extends Activity {
                     if ("scanner".equals(currentPage)) {
                         output.setText(finalDisplay);
                     }
+
                     status.setText(scanFailed
-                            ? "SCAN FAILED — SEE ERROR BELOW"
-                            : "SCAN COMPLETE — DEMO ONLY");
-                    status.setTextColor(scanFailed ? Color.RED : Color.GREEN);
+                            ? "SCAN FAILED — SEE ERROR"
+                            : "SCAN FINISHED — DEMO ONLY");
+
+                    status.setTextColor(
+                            scanFailed ? Color.RED : Color.GREEN);
+
                     scanButton.setEnabled(true);
                     scanButton.setText("SCAN NOW");
-                    updateDashboard();
                     scanning = false;
+                    updateDashboard();
                 });
             });
         } catch (RejectedExecutionException e) {
@@ -302,12 +328,14 @@ public class MainActivity extends Activity {
             scanButton.setEnabled(true);
             scanButton.setText("SCAN NOW");
             status.setText("Scan could not start. Restart app.");
+            status.setTextColor(Color.RED);
             output.setText(e.toString());
         }
     }
 
     private void updateDashboard() {
         if (dashboard == null || trader == null) return;
+
         dashboard.setText(String.format(Locale.US,
                 "Demo balance: %.2f USDT | Open: %d | Realized P/L: %.2f",
                 trader.getBalance(), trader.getOpenTradeCount(),
@@ -318,7 +346,9 @@ public class MainActivity extends Activity {
         StringBuilder b = new StringBuilder("SIMULATED TRADE HISTORY\n\n");
         List<DemoTrader.Trade> trades = trader.getTradeHistory();
 
-        if (trades.isEmpty()) b.append("No demo trades yet.\n");
+        if (trades.isEmpty()) {
+            b.append("No demo trades yet.\n");
+        }
 
         for (DemoTrader.Trade t : trades) {
             b.append(t.symbol).append(" | ").append(t.side).append("\n");
@@ -345,8 +375,10 @@ public class MainActivity extends Activity {
         if (message.isEmpty()) return;
 
         String reply = assistant.reply(message);
+
         chatTranscript += "You: " + message
                 + "\nAssistant: " + reply + "\n\n";
+
         chatLog.setText(chatTranscript);
         chatInput.setText("");
         showPage("chat");
@@ -357,8 +389,10 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         running = false;
         handler.removeCallbacks(scanLoop);
+
         if (scanner != null) scanner.shutdown();
         worker.shutdownNow();
+
         super.onDestroy();
     }
 }
